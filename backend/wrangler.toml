@@ -1,0 +1,6 @@
+name = "the-keeper"
+main = "worker.js"
+compatibility_date = "2026-02-08"
+
+# optional but recommended
+workers_dev = true

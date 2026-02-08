@@ -1,0 +1,21 @@
+# Private home documents
+/docs/
+
+# Node
+node_modules/
+dist/
+
+# Env files
+.env
+*.env
+frontend/.env
+
+# Private home docs
+/docs/
+
+# Cloudflare
+.wrangler/
+.dev.vars
+
+# OS
+.DS_Store
