@@ -2,5 +2,5 @@ name = "the-keeper"
 main = "worker.js"
 compatibility_date = "2026-02-08"
 
-# optional but recommended
+ai = { binding = "thekeeper_binding" }
 workers_dev = true
