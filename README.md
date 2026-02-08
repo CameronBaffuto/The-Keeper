@@ -2,6 +2,8 @@
 
 Personal home knowledge system backed by Cloudflare Workers + AI Search.
 
+URL: https://the-keeper.pages.dev
+
 ## Structure
 - /backend – Cloudflare Worker (API)
 - /frontend – Vite + Vue chat UI

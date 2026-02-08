@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import keeperLogo from '@/assets/thekeeper.png'
+import keeperLogo from '@/assets/thekeeperLogo.png'
 const name = 'The Keeper'
 </script>
 
