@@ -63,14 +63,13 @@ export default {
       const rag = env.thekeeper_binding.autorag("thekeeper-rag");
 
       // -------------------------
-      // POST /api/chat  (single endpoint)
+      // POST /api/chat
       // -------------------------
       if (url.pathname === "/api/chat") {
         if (request.method !== "POST") return json({ error: "Use POST" }, 405);
 
         const body = await request.json().catch(() => ({}));
 
-        // Accept either `message` or `messages[]`
         let messages = body.messages;
         const message = body.message;
 
