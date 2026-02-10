@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { ArrowUp, Laptop, Moon, Sun } from 'lucide-vue-next'
+import { ArrowUp, Laptop, Moon, Plus, Sun } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import keeperAvatar from '@/assets/thekeeper.png'
 import { useChatStore } from '@/stores/chatStore'
@@ -33,6 +33,11 @@ const onSend = async () => {
   input.value = ''
 }
 
+const onNewChat = () => {
+  chatStore.resetConversation()
+  input.value = ''
+}
+
 watch(
   () => messages.value.length,
   () => {
@@ -58,19 +63,25 @@ watch(
           <img :src="keeperAvatar" alt="The Keeper avatar" class="size-9 rounded-full border object-cover" />
           <div>
             <h1 class="text-base font-semibold leading-tight">{{ appName }}</h1>
-            <p class="text-xs text-muted-foreground">Chat UI prototype</p>
+            <p class="text-xs text-muted-foreground">Guardian of Context</p>
           </div>
         </div>
-        <Button
-          variant="outline"
-          size="icon-sm"
-          class="size-8"
-          :title="`Theme: ${themeLabel}`"
-          @click="themeStore.toggleThemeMode"
-        >
-          <component :is="themeIcon" class="size-4" />
-          <span class="sr-only">{{ themeLabel }}</span>
-        </Button>
+        <div class="flex items-center gap-2">
+          <Button variant="outline" size="icon-sm" class="size-8" title="New chat" @click="onNewChat">
+            <Plus class="size-4" />
+            <span class="sr-only">New chat</span>
+          </Button>
+          <Button
+            variant="outline"
+            size="icon-sm"
+            class="size-8"
+            :title="`Theme: ${themeLabel}`"
+            @click="themeStore.toggleThemeMode"
+          >
+            <component :is="themeIcon" class="size-4" />
+            <span class="sr-only">{{ themeLabel }}</span>
+          </Button>
+        </div>
       </div>
     </header>
 
@@ -111,7 +122,7 @@ watch(
         <input
           v-model="input"
           type="text"
-          placeholder="Type your message..."
+          placeholder="Ask anything..."
           class="h-11 min-w-0 flex-1 rounded-xl border bg-card px-3 text-base text-card-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:text-sm"
         />
         <Button
