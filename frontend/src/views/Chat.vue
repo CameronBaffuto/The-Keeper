@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { Laptop, Moon, Sun } from 'lucide-vue-next'
+import { ArrowUp, Laptop, Moon, Sun } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import keeperAvatar from '@/assets/thekeeper.png'
 import { useChatStore } from '@/stores/chatStore'
@@ -106,16 +106,23 @@ watch(
       </article>
     </section>
 
-    <footer class="border-t bg-background px-4 py-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)]">
+    <footer class="border-t bg-background px-3 pt-3 pb-[calc(env(safe-area-inset-bottom)+1rem)] sm:px-4">
       <form class="flex items-center gap-2" @submit.prevent="onSend">
         <input
           v-model="input"
           type="text"
           placeholder="Type your message..."
-          class="h-11 flex-1 rounded-xl border bg-card px-3 text-sm text-card-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          class="h-11 min-w-0 flex-1 rounded-xl border bg-card px-3 text-base text-card-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:text-sm"
         />
-        <Button type="submit" size="sm" class="h-11 rounded-xl px-4" :disabled="!input.trim() || isSending">
-          {{ isSending ? 'Sending' : 'Send' }}
+        <Button
+          type="submit"
+          size="icon"
+          class="size-11 shrink-0 rounded-xl"
+          :disabled="!input.trim() || isSending"
+          :title="isSending ? 'Sending' : 'Send message'"
+        >
+          <ArrowUp class="size-5" />
+          <span class="sr-only">{{ isSending ? 'Sending' : 'Send message' }}</span>
         </Button>
       </form>
     </footer>
