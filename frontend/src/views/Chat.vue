@@ -5,14 +5,16 @@ import { ArrowUp, Laptop, Moon, Plus, Sun } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import keeperAvatar from '@/assets/thekeeper.png'
 import { useChatStore } from '@/stores/chatStore'
+import { useStreamChat } from '@/composables/useStreamChat'
 import { useThemeStore } from '@/stores/themeStore'
 
 const appName = 'The Keeper'
 const input = ref('')
 const messageContainer = ref<HTMLElement | null>(null)
 const chatStore = useChatStore()
+const { sendStreaming, cancelStreaming } = useStreamChat()
 const themeStore = useThemeStore()
-const { messages, isSending, hasMessages } = storeToRefs(chatStore)
+const { messages, isSending, isStreaming, hasMessages } = storeToRefs(chatStore)
 const { themeLabel, themeMode } = storeToRefs(themeStore)
 
 const themeIcon = computed(() => {
@@ -29,8 +31,12 @@ const scrollToBottom = async () => {
 }
 
 const onSend = async () => {
-  await chatStore.sendMessage(input.value)
+  await sendStreaming(input.value)
   input.value = ''
+}
+
+const onStopGenerating = () => {
+  cancelStreaming()
 }
 
 const onNewChat = () => {
@@ -39,7 +45,7 @@ const onNewChat = () => {
 }
 
 watch(
-  () => messages.value.length,
+  () => messages.value.map((message) => message.text).join('\n'),
   () => {
     scrollToBottom()
   },
@@ -47,7 +53,7 @@ watch(
 )
 
 watch(
-  () => isSending.value,
+  () => isStreaming.value,
   () => {
     scrollToBottom()
   },
@@ -119,6 +125,15 @@ watch(
 
     <footer class="border-t bg-background px-3 pt-3 pb-[calc(env(safe-area-inset-bottom)+1rem)] sm:px-4">
       <form class="flex items-center gap-2" @submit.prevent="onSend">
+        <Button
+          v-if="isStreaming"
+          type="button"
+          variant="outline"
+          class="h-11 shrink-0 rounded-xl"
+          @click="onStopGenerating"
+        >
+          Stop generating
+        </Button>
         <input
           v-model="input"
           type="text"
@@ -129,11 +144,11 @@ watch(
           type="submit"
           size="icon"
           class="size-11 shrink-0 rounded-xl"
-          :disabled="!input.trim() || isSending"
-          :title="isSending ? 'Sending' : 'Send message'"
+          :disabled="!input.trim() || isSending || isStreaming"
+          :title="isSending || isStreaming ? 'Sending' : 'Send message'"
         >
           <ArrowUp class="size-5" />
-          <span class="sr-only">{{ isSending ? 'Sending' : 'Send message' }}</span>
+          <span class="sr-only">{{ isSending || isStreaming ? 'Sending' : 'Send message' }}</span>
         </Button>
       </form>
     </footer>
