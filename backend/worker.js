@@ -4,6 +4,8 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "Content-Type,Authorization",
 };
 
+const DEFAULT_CHAT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
+
 function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
@@ -156,7 +158,48 @@ export default {
         }
       }
 
-      if (!env.thekeeper_binding || typeof env.thekeeper_binding.autorag !== "function") {
+      if (!env.thekeeper_binding) {
+        return json(
+          {
+            error:
+              "Workers AI binding missing or misnamed. Ensure you added a Workers AI binding named 'thekeeper_binding'.",
+          },
+          500
+        );
+      }
+
+      if (url.pathname === "/api/chat/stream") {
+        if (request.method !== "POST") return json({ error: "Use POST" }, 405);
+
+        const body = await request.json().catch(() => ({}));
+        const messages = normalizeMessages(body);
+        if (!messages) {
+          return json({ error: "Provide `message` (string) or `messages` (array)" }, 400);
+        }
+
+        const model = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : DEFAULT_CHAT_MODEL;
+
+        try {
+          const stream = await env.thekeeper_binding.run(model, {
+            messages,
+            stream: true,
+          });
+
+          return new Response(stream, {
+            status: 200,
+            headers: {
+              ...CORS_HEADERS,
+              "Content-Type": "text/event-stream; charset=utf-8",
+              "Cache-Control": "no-cache, no-transform",
+              Connection: "keep-alive",
+            },
+          });
+        } catch (error) {
+          return json({ error: error?.message ?? "Streaming request failed" }, 500);
+        }
+      }
+
+      if (typeof env.thekeeper_binding.autorag !== "function") {
         return json(
           {
             error:
