@@ -2,19 +2,18 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ArrowUp, Laptop, Moon, Plus, Sun } from 'lucide-vue-next'
+import { marked } from 'marked'
 import { Button } from '@/components/ui/button'
 import keeperAvatar from '@/assets/thekeeper.png'
 import { useChatStore } from '@/stores/chatStore'
-import { useStreamChat } from '@/composables/useStreamChat'
 import { useThemeStore } from '@/stores/themeStore'
 
 const appName = 'The Keeper'
 const input = ref('')
 const messageContainer = ref<HTMLElement | null>(null)
 const chatStore = useChatStore()
-const { sendStreaming, cancelStreaming } = useStreamChat()
 const themeStore = useThemeStore()
-const { messages, isSending, isStreaming, hasMessages } = storeToRefs(chatStore)
+const { messages, isSending, hasMessages } = storeToRefs(chatStore)
 const { themeLabel, themeMode } = storeToRefs(themeStore)
 
 const themeIcon = computed(() => {
@@ -22,6 +21,21 @@ const themeIcon = computed(() => {
   if (themeMode.value === 'dark') return Moon
   return Sun
 })
+
+const visibleMessages = computed(() => {
+  return messages.value.filter((message) => {
+    if (message.role !== 'assistant') return true
+    return message.text.trim().length > 0
+  })
+})
+
+const renderMarkdown = (text: string) => {
+  const normalized = text
+    .replace(/\\([`*_{}\[\]()#+\-.!])/g, '$1')
+    .replace(/\r\n/g, '\n')
+
+  return marked.parse(normalized, { gfm: true, breaks: true }) as string
+}
 
 const scrollToBottom = async () => {
   await nextTick()
@@ -31,12 +45,11 @@ const scrollToBottom = async () => {
 }
 
 const onSend = async () => {
-  await sendStreaming(input.value)
-  input.value = ''
-}
+  const message = input.value.trim()
+  if (!message || isSending.value) return
 
-const onStopGenerating = () => {
-  cancelStreaming()
+  input.value = ''
+  await chatStore.sendMessage(message)
 }
 
 const onNewChat = () => {
@@ -52,13 +65,6 @@ watch(
   { flush: 'post', immediate: true },
 )
 
-watch(
-  () => isStreaming.value,
-  () => {
-    scrollToBottom()
-  },
-  { flush: 'post' },
-)
 </script>
 
 <template>
@@ -96,7 +102,7 @@ watch(
         Start a conversation with The Keeper.
       </div>
       <article
-        v-for="message in messages"
+        v-for="message in visibleMessages"
         :key="message.id"
         class="flex items-end gap-2"
         :class="message.role === 'assistant' ? 'justify-start' : 'justify-end'"
@@ -115,25 +121,31 @@ watch(
               : 'rounded-br-sm bg-primary text-primary-foreground'
           "
         >
-          <p>{{ message.text }}</p>
+          <div
+            v-if="message.role === 'assistant'"
+            class="[&_a]:font-medium [&_a]:underline [&_a]:decoration-current/60 hover:[&_a]:decoration-current [&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_blockquote]:italic [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_h1]:mb-2 [&_h1]:text-base [&_h1]:font-semibold [&_h2]:mb-2 [&_h2]:text-sm [&_h2]:font-semibold [&_li]:ml-5 [&_li]:list-disc [&_ol]:my-2 [&_ol]:space-y-1 [&_p]:mb-2 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded [&_pre]:bg-muted [&_pre]:p-2 [&_ul]:my-2 [&_ul]:space-y-1 [&>*:last-child]:mb-0"
+            v-html="renderMarkdown(message.text)"
+          ></div>
+          <p v-else class="whitespace-pre-wrap">{{ message.text }}</p>
           <time class="mt-1 block text-xs opacity-75">
             {{ message.createdAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) }}
           </time>
+        </div>
+      </article>
+      <article v-if="isSending" class="flex items-end gap-2 justify-start">
+        <img :src="keeperAvatar" alt="Keeper" class="size-7 shrink-0 rounded-full border object-cover" />
+        <div class="rounded-2xl rounded-bl-sm border bg-card px-3 py-3 text-card-foreground">
+          <div class="flex items-center gap-1.5">
+            <span class="size-2 rounded-full bg-muted-foreground/70 animate-bounce [animation-delay:-0.3s]"></span>
+            <span class="size-2 rounded-full bg-muted-foreground/70 animate-bounce [animation-delay:-0.15s]"></span>
+            <span class="size-2 rounded-full bg-muted-foreground/70 animate-bounce"></span>
+          </div>
         </div>
       </article>
     </section>
 
     <footer class="border-t bg-background px-3 pt-3 pb-[calc(env(safe-area-inset-bottom)+1rem)] sm:px-4">
       <form class="flex items-center gap-2" @submit.prevent="onSend">
-        <Button
-          v-if="isStreaming"
-          type="button"
-          variant="outline"
-          class="h-11 shrink-0 rounded-xl"
-          @click="onStopGenerating"
-        >
-          Stop generating
-        </Button>
         <input
           v-model="input"
           type="text"
@@ -144,11 +156,11 @@ watch(
           type="submit"
           size="icon"
           class="size-11 shrink-0 rounded-xl"
-          :disabled="!input.trim() || isSending || isStreaming"
-          :title="isSending || isStreaming ? 'Sending' : 'Send message'"
+          :disabled="!input.trim() || isSending"
+          :title="isSending ? 'Sending' : 'Send message'"
         >
           <ArrowUp class="size-5" />
-          <span class="sr-only">{{ isSending || isStreaming ? 'Sending' : 'Send message' }}</span>
+          <span class="sr-only">{{ isSending ? 'Sending' : 'Send message' }}</span>
         </Button>
       </form>
     </footer>

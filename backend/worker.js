@@ -178,11 +178,17 @@ export default {
         }
 
         const model = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : DEFAULT_CHAT_MODEL;
+        const requestedMaxTokens = Number(body?.max_tokens);
+        const max_tokens =
+          Number.isFinite(requestedMaxTokens) && requestedMaxTokens > 0
+            ? Math.min(Math.max(Math.floor(requestedMaxTokens), 64), 512)
+            : 220;
 
         try {
           const stream = await env.thekeeper_binding.run(model, {
             messages,
             stream: true,
+            max_tokens,
           });
 
           return new Response(stream, {
