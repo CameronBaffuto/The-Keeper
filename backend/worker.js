@@ -181,6 +181,17 @@ function buildRagContext(records, maxChars = 12000) {
   return blocks.join("\n\n");
 }
 
+function hasAnySnippetContent(records) {
+  if (!Array.isArray(records)) return false;
+  return records.some((record) => getRecordText(record).trim().length > 0);
+}
+
+function normalizeSourcePath(source) {
+  let value = safeString(source).trim().replace(/\\/g, "/");
+  value = value.replace(/(?:docs\/appliances\/){2,}/g, "docs/appliances/");
+  return value;
+}
+
 function buildOpenAIRagMessages({ question, retrievalQuery, ragContext, sourceFiles }) {
   const sourceList = sourceFiles.length ? sourceFiles.join(", ") : "(none)";
   const context = ragContext || "(no retrieved document snippets)";
@@ -235,7 +246,7 @@ async function aiSearchWithFallback(rag, query, max_num_results, score_threshold
 }
 
 function extractSources(output) {
-  const sources = (output?.data ?? []).map((d) => d?.filename).filter(Boolean);
+  const sources = (output?.data ?? []).map((d) => normalizeSourcePath(d?.filename)).filter(Boolean);
   return [...new Set(sources)];
 }
 
@@ -312,7 +323,7 @@ function extractManufacturerFromRecords(records) {
 
       return {
         manufacturer: value.replace(/[.;,]\s*$/, ""),
-        source: safeString(record?.filename || ""),
+        source: normalizeSourcePath(record?.filename || ""),
       };
     }
   }
@@ -321,7 +332,7 @@ function extractManufacturerFromRecords(records) {
 }
 
 function sourceToEntityLabel(source) {
-  return safeString(source)
+  return normalizeSourcePath(source)
     .replace(/\.[^.]+$/, "")
     .replace(/[-_]/g, " ")
     .trim();
@@ -488,34 +499,53 @@ export default {
         let answerText = "";
         let parseError = null;
         let isNotFound = false;
+        const cfFallback = normalizeModelResult(output);
+        const hasRagSnippetContent = hasAnySnippetContent(output?.data ?? []);
 
         if (provider === "openai") {
-          const requestedModel = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : "";
-          const model = requestedModel || safeString(env.OPENAI_MODEL).trim() || DEFAULT_OPENAI_MODEL;
-          const ragContext = buildRagContext(output?.data ?? []);
-          const openAIMessages = buildOpenAIRagMessages({
-            question,
-            retrievalQuery,
-            ragContext,
-            sourceFiles: uniqueSources,
-          });
+          if (!hasRagSnippetContent) {
+            ({ modelResult, answerText, parseError, isNotFound } = cfFallback);
+          } else {
+            const requestedModel = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : "";
+            const model = requestedModel || safeString(env.OPENAI_MODEL).trim() || DEFAULT_OPENAI_MODEL;
+            const ragContext = buildRagContext(output?.data ?? []);
+            const openAIMessages = buildOpenAIRagMessages({
+              question,
+              retrievalQuery,
+              ragContext,
+              sourceFiles: uniqueSources,
+            });
 
-          const requestedMaxTokens = Number(body?.max_tokens);
-          const max_tokens =
-            Number.isFinite(requestedMaxTokens) && requestedMaxTokens > 0
-              ? Math.min(Math.max(Math.floor(requestedMaxTokens), 128), 1024)
-              : 420;
+            const requestedMaxTokens = Number(body?.max_tokens);
+            const max_tokens =
+              Number.isFinite(requestedMaxTokens) && requestedMaxTokens > 0
+                ? Math.min(Math.max(Math.floor(requestedMaxTokens), 128), 1024)
+                : 420;
 
-          const openAIResult = await callOpenAI({
-            env,
-            messages: openAIMessages,
-            model,
-            max_tokens,
-            stream: false,
-          });
-          ({ modelResult, answerText, parseError, isNotFound } = normalizeModelResult({
-            response: openAIResult.text,
-          }));
+            const openAIResult = await callOpenAI({
+              env,
+              messages: openAIMessages,
+              model,
+              max_tokens,
+              stream: false,
+            });
+            ({ modelResult, answerText, parseError, isNotFound } = normalizeModelResult({
+              response: openAIResult.text,
+            }));
+
+            const openAIWasUnhelpful =
+              isNotFound ||
+              (!modelResult && (!answerText || answerText.toUpperCase() === "NOT_FOUND")) ||
+              parseError;
+
+            if (openAIWasUnhelpful) {
+              const cfHasObject = cfFallback.modelResult && typeof cfFallback.modelResult === "object" && !cfFallback.isNotFound;
+              const cfHasText = !!cfFallback.answerText && cfFallback.answerText.toUpperCase() !== "NOT_FOUND";
+              if (cfHasObject || cfHasText) {
+                ({ modelResult, answerText, parseError, isNotFound } = cfFallback);
+              }
+            }
+          }
         } else {
           ({ modelResult, answerText, parseError, isNotFound } = normalizeModelResult(output));
         }
