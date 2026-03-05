@@ -129,6 +129,28 @@ function buildRetrievalQuery(messages, userTurns = 3) {
   return lastUserTurns.join("\n");
 }
 
+function looksLikeFollowUp(question) {
+  const q = safeString(question).trim().toLowerCase();
+  if (!q) return false;
+  const tokens = q.split(/\s+/).filter(Boolean);
+  if (tokens.length > 10) return false;
+  return /\b(it|that|this|one|unit|system)\b/.test(q);
+}
+
+function buildRetrievalQueryWithFallbackContext(messages, userTurns = 4) {
+  const baseQuery = buildRetrievalQuery(messages, userTurns);
+  const lastUserQuestion = getLastUserQuestion(messages);
+  if (!looksLikeFollowUp(lastUserQuestion)) return baseQuery;
+
+  const recentWindow = messages
+    .slice(-10)
+    .map((m) => `${m.role}: ${safeString(m.content).trim()}`)
+    .filter((line) => line.length > 0);
+
+  const contextualQuery = recentWindow.join("\n");
+  return contextualQuery || baseQuery;
+}
+
 function buildDebugContext(messages, windowSize = 10) {
   const windowMessages = messages.slice(-windowSize);
   return windowMessages.map((m) => `${m.role.toUpperCase()}: ${m.content}`).join("\n");
@@ -165,12 +187,15 @@ function buildOpenAIRagMessages({ question, retrievalQuery, ragContext, sourceFi
 
   const system = [
     "You are The Keeper, a home knowledge assistant.",
-    "Answer strictly from provided context.",
-    "If context is missing or insufficient, return answer as NOT_FOUND.",
+    "Answer from provided context and grounded inference only.",
+    "Grounded inference means simple deductions from model numbers, filenames, or nearby fields.",
+    "If the user question is ambiguous or missing a target entity, ask exactly one concise clarifying question in the answer field.",
+    "Use NOT_FOUND only when the question is clear and context is still insufficient after grounded inference.",
     "Return valid JSON only with keys: answer, sources, confidence, thread_status.",
     "confidence must be one of: low, medium, high.",
     "thread_status must include should_start_new_chat (boolean) and reason (string).",
     "sources must be an array of filenames actually used.",
+    "Tone should be concise and authoritative, like a house oracle.",
   ].join(" ");
 
   const user = [
@@ -201,8 +226,8 @@ async function aiSearchWithFallback(rag, query, max_num_results, score_threshold
   const pass2 = await rag.aiSearch({
     query,
     rewrite_query: false,
-    max_num_results: Math.max(5, max_num_results),
-    ranking_options: { score_threshold: Math.min(0.45, score_threshold) },
+    max_num_results: Math.max(8, max_num_results),
+    ranking_options: { score_threshold: Math.min(0.35, score_threshold) },
     reranking: { enabled: true },
   });
 
@@ -254,6 +279,80 @@ function normalizeModelResult(output) {
     (modelAnswer != null && String(modelAnswer).toUpperCase() === "NOT_FOUND");
 
   return { modelResult, answerText, parseError, isNotFound };
+}
+
+function getRecordText(record) {
+  return safeString(
+    record?.content || record?.text || record?.chunk || record?.snippet || record?.excerpt || record?.body || ""
+  );
+}
+
+function detectBrandManufacturerIntent(question) {
+  return /\b(brand|manufacturer|make|who makes|who made)\b/i.test(safeString(question));
+}
+
+function extractManufacturerFromRecords(records) {
+  if (!Array.isArray(records)) return null;
+
+  const patterns = [
+    /(?:^|\n)\s*[-*]?\s*(?:\*\*)?(?:brand|manufacturer)(?:\*\*)?\s*:\s*([^\n\r]+)/i,
+    /(?:^|\n)\s*[-*]?\s*(?:\*\*)?made by(?:\*\*)?\s*:\s*([^\n\r]+)/i,
+  ];
+
+  for (const record of records) {
+    const text = getRecordText(record);
+    if (!text) continue;
+
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (!match?.[1]) continue;
+
+      const value = safeString(match[1]).replace(/\*/g, "").trim();
+      if (!value) continue;
+
+      return {
+        manufacturer: value.replace(/[.;,]\s*$/, ""),
+        source: safeString(record?.filename || ""),
+      };
+    }
+  }
+
+  return null;
+}
+
+function sourceToEntityLabel(source) {
+  return safeString(source)
+    .replace(/\.[^.]+$/, "")
+    .replace(/[-_]/g, " ")
+    .trim();
+}
+
+function buildClarifyingQuestion(question, sources) {
+  const q = safeString(question).trim();
+  const choices = (Array.isArray(sources) ? sources : [])
+    .slice(0, 3)
+    .map(sourceToEntityLabel)
+    .filter(Boolean);
+
+  if (looksLikeFollowUp(q)) {
+    if (choices.length >= 2) {
+      return `Which one do you mean: ${choices.join(", ")}?`;
+    }
+    return "Which appliance or system are you referring to?";
+  }
+
+  if (detectBrandManufacturerIntent(q)) {
+    if (choices.length >= 2) {
+      return `Which item do you want the manufacturer for: ${choices.join(", ")}?`;
+    }
+    return "Which appliance should I check for the manufacturer?";
+  }
+
+  if (choices.length >= 2) {
+    return `Can you clarify which item you mean: ${choices.join(", ")}?`;
+  }
+
+  return "Can you clarify which appliance, room, or model number you mean?";
 }
 
 export default {
@@ -373,11 +472,11 @@ export default {
         const windowSize = body.windowSize ?? 10;
         const debugContext = buildDebugContext(messages, windowSize);
 
-        const retrievalQuery = buildRetrievalQuery(messages, body.userTurns ?? 3);
+        const retrievalQuery = buildRetrievalQueryWithFallbackContext(messages, body.userTurns ?? 4);
         const estimated_tokens = Math.ceil(retrievalQuery.length / 4);
 
-        const max_num_results = body.max_num_results ?? 3;
-        const score_threshold = body.score_threshold ?? 0.55;
+        const max_num_results = body.max_num_results ?? 5;
+        const score_threshold = body.score_threshold ?? 0.5;
 
         const output = await aiSearchWithFallback(rag, retrievalQuery, max_num_results, score_threshold);
 
@@ -422,16 +521,45 @@ export default {
         }
 
         if (isNotFound) {
+          const isBrandQuestion = detectBrandManufacturerIntent(question);
+          if (isBrandQuestion) {
+            const extractedManufacturer = extractManufacturerFromRecords(output?.data ?? []);
+            if (extractedManufacturer?.manufacturer) {
+              return json({
+                ok: true,
+                question,
+                result: {
+                  answer: `The manufacturer is ${extractedManufacturer.manufacturer}.`,
+                  sources: extractedManufacturer.source ? [extractedManufacturer.source] : uniqueSources,
+                  confidence: "high",
+                  thread_status: {
+                    should_start_new_chat: false,
+                    reason: "Extracted manufacturer directly from retrieved document metadata.",
+                  },
+                },
+                meta: {
+                  estimated_tokens,
+                  windowSize,
+                  max_num_results,
+                  score_threshold,
+                  topScore: typeof topScore === "number" ? topScore : null,
+                  query_sent_to_aiSearch: retrievalQuery,
+                },
+              });
+            }
+          }
+
+          const clarifyingQuestion = buildClarifyingQuestion(question, uniqueSources);
           return json({
             ok: true,
             question,
             result: {
-              answer: "NOT_FOUND",
-              sources: [],
+              answer: clarifyingQuestion,
+              sources: uniqueSources,
               confidence: "low",
               thread_status: {
                 should_start_new_chat: false,
-                reason: "No matching info found in the indexed docs for this query.",
+                reason: "Context was insufficient or ambiguous; asked a clarifying question.",
               },
             },
             meta: {
