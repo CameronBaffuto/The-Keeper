@@ -4,7 +4,9 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "Content-Type,Authorization",
 };
 
-const DEFAULT_CHAT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
+const DEFAULT_CF_CHAT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
+const DEFAULT_OPENAI_MODEL = "gpt-5-nano";
+const OPENAI_RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses";
 
 function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -19,6 +21,79 @@ function json(data, status = 200, extraHeaders = {}) {
 
 function safeString(v) {
   return typeof v === "string" ? v : v == null ? "" : String(v);
+}
+
+function getProvider(env) {
+  const provider = safeString(env?.CHAT_PROVIDER || "cloudflare").trim().toLowerCase();
+  return provider === "openai" ? "openai" : "cloudflare";
+}
+
+function toOpenAIInput(messages) {
+  return messages.map((m) => ({
+    role: m.role === "assistant" || m.role === "system" ? m.role : "user",
+    content: [{ type: "input_text", text: safeString(m.content) }],
+  }));
+}
+
+function extractOpenAIText(payload) {
+  if (typeof payload?.output_text === "string" && payload.output_text.trim()) {
+    return payload.output_text.trim();
+  }
+
+  if (Array.isArray(payload?.output_text)) {
+    const joined = payload.output_text.map((v) => safeString(v)).join("").trim();
+    if (joined) return joined;
+  }
+
+  if (Array.isArray(payload?.output)) {
+    const chunks = [];
+    for (const item of payload.output) {
+      if (!Array.isArray(item?.content)) continue;
+      for (const contentItem of item.content) {
+        if (contentItem?.type === "output_text" && typeof contentItem?.text === "string") {
+          chunks.push(contentItem.text);
+        }
+      }
+    }
+    const joined = chunks.join("").trim();
+    if (joined) return joined;
+  }
+
+  const chatCompletionsText = payload?.choices?.[0]?.message?.content;
+  return typeof chatCompletionsText === "string" ? chatCompletionsText.trim() : "";
+}
+
+async function callOpenAI({ env, messages, model, max_tokens, stream = false }) {
+  const apiKey = safeString(env?.OPENAI_API_KEY).trim();
+  if (!apiKey) {
+    throw new Error("Missing OPENAI_API_KEY secret in Worker environment.");
+  }
+
+  const body = {
+    model,
+    input: toOpenAIInput(messages),
+    max_output_tokens: max_tokens,
+    stream,
+  };
+
+  const response = await fetch(OPENAI_RESPONSES_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => "");
+    throw new Error(`OpenAI request failed (${response.status}): ${safeString(errText).slice(0, 500)}`);
+  }
+
+  if (stream) return response.body;
+
+  const payload = await response.json();
+  return { payload, text: extractOpenAIText(payload) };
 }
 
 function normalizeMessages(body) {
@@ -57,6 +132,59 @@ function buildRetrievalQuery(messages, userTurns = 3) {
 function buildDebugContext(messages, windowSize = 10) {
   const windowMessages = messages.slice(-windowSize);
   return windowMessages.map((m) => `${m.role.toUpperCase()}: ${m.content}`).join("\n");
+}
+
+function buildRagContext(records, maxChars = 12000) {
+  if (!Array.isArray(records) || records.length === 0) return "";
+
+  const blocks = [];
+  let used = 0;
+
+  for (let i = 0; i < records.length; i += 1) {
+    const record = records[i] || {};
+    const filename = safeString(record.filename || record.source || `source-${i + 1}`);
+    const score = typeof record.score === "number" ? record.score.toFixed(3) : "n/a";
+    const snippet = safeString(
+      record.content || record.text || record.chunk || record.snippet || record.excerpt || record.body || ""
+    );
+    const block = snippet
+      ? `[${i + 1}] ${filename} (score: ${score})\n${snippet}`
+      : `[${i + 1}] ${filename} (score: ${score})`;
+
+    if (used + block.length > maxChars) break;
+    blocks.push(block);
+    used += block.length + 2;
+  }
+
+  return blocks.join("\n\n");
+}
+
+function buildOpenAIRagMessages({ question, retrievalQuery, ragContext, sourceFiles }) {
+  const sourceList = sourceFiles.length ? sourceFiles.join(", ") : "(none)";
+  const context = ragContext || "(no retrieved document snippets)";
+
+  const system = [
+    "You are The Keeper, a home knowledge assistant.",
+    "Answer strictly from provided context.",
+    "If context is missing or insufficient, return answer as NOT_FOUND.",
+    "Return valid JSON only with keys: answer, sources, confidence, thread_status.",
+    "confidence must be one of: low, medium, high.",
+    "thread_status must include should_start_new_chat (boolean) and reason (string).",
+    "sources must be an array of filenames actually used.",
+  ].join(" ");
+
+  const user = [
+    `Question: ${question}`,
+    `Retrieval query: ${retrievalQuery}`,
+    `Retrieved source filenames: ${sourceList}`,
+    "Context:",
+    context,
+  ].join("\n\n");
+
+  return [
+    { role: "system", content: system },
+    { role: "user", content: user },
+  ];
 }
 
 async function aiSearchWithFallback(rag, query, max_num_results, score_threshold) {
@@ -132,6 +260,7 @@ export default {
   async fetch(request, env) {
     try {
       const url = new URL(request.url);
+      const provider = getProvider(env);
 
       if (request.method === "OPTIONS") {
         return new Response(null, { status: 204, headers: CORS_HEADERS });
@@ -143,6 +272,9 @@ export default {
 
       if (url.pathname === "/debug") {
         return json({
+          provider,
+          openaiModel: safeString(env.OPENAI_MODEL).trim() || DEFAULT_OPENAI_MODEL,
+          hasOpenAIKey: !!safeString(env.OPENAI_API_KEY).trim(),
           hasWorkersAI: !!env.thekeeper_binding,
           hasAutorag: typeof env.thekeeper_binding?.autorag === "function",
         });
@@ -158,7 +290,7 @@ export default {
         }
       }
 
-      if (!env.thekeeper_binding) {
+      if (provider === "cloudflare" && !env.thekeeper_binding) {
         return json(
           {
             error:
@@ -177,7 +309,12 @@ export default {
           return json({ error: "Provide `message` (string) or `messages` (array)" }, 400);
         }
 
-        const model = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : DEFAULT_CHAT_MODEL;
+        const requestedModel = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : "";
+        const model =
+          requestedModel ||
+          (provider === "openai"
+            ? safeString(env.OPENAI_MODEL).trim() || DEFAULT_OPENAI_MODEL
+            : DEFAULT_CF_CHAT_MODEL);
         const requestedMaxTokens = Number(body?.max_tokens);
         const max_tokens =
           Number.isFinite(requestedMaxTokens) && requestedMaxTokens > 0
@@ -185,11 +322,14 @@ export default {
             : 220;
 
         try {
-          const stream = await env.thekeeper_binding.run(model, {
-            messages,
-            stream: true,
-            max_tokens,
-          });
+          const stream =
+            provider === "openai"
+              ? await callOpenAI({ env, messages, model, max_tokens, stream: true })
+              : await env.thekeeper_binding.run(model, {
+                  messages,
+                  stream: true,
+                  max_tokens,
+                });
 
           return new Response(stream, {
             status: 200,
@@ -205,7 +345,7 @@ export default {
         }
       }
 
-      if (typeof env.thekeeper_binding.autorag !== "function") {
+      if (url.pathname === "/api/chat" && typeof env.thekeeper_binding?.autorag !== "function") {
         return json(
           {
             error:
@@ -215,7 +355,7 @@ export default {
         );
       }
 
-      const rag = env.thekeeper_binding.autorag("thekeeper-rag");
+      const rag = url.pathname === "/api/chat" ? env.thekeeper_binding.autorag("thekeeper-rag") : null;
 
       if (url.pathname === "/api/chat") {
         if (request.method !== "POST") return json({ error: "Use POST" }, 405);
@@ -245,8 +385,41 @@ export default {
         const topScore = output?.data?.[0]?.score;
 
         const heuristicConfidence = heuristicConfidenceFromTopScore(topScore, uniqueSources.length > 0);
+        let modelResult = null;
+        let answerText = "";
+        let parseError = null;
+        let isNotFound = false;
 
-        const { modelResult, answerText, parseError, isNotFound } = normalizeModelResult(output);
+        if (provider === "openai") {
+          const requestedModel = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : "";
+          const model = requestedModel || safeString(env.OPENAI_MODEL).trim() || DEFAULT_OPENAI_MODEL;
+          const ragContext = buildRagContext(output?.data ?? []);
+          const openAIMessages = buildOpenAIRagMessages({
+            question,
+            retrievalQuery,
+            ragContext,
+            sourceFiles: uniqueSources,
+          });
+
+          const requestedMaxTokens = Number(body?.max_tokens);
+          const max_tokens =
+            Number.isFinite(requestedMaxTokens) && requestedMaxTokens > 0
+              ? Math.min(Math.max(Math.floor(requestedMaxTokens), 128), 1024)
+              : 420;
+
+          const openAIResult = await callOpenAI({
+            env,
+            messages: openAIMessages,
+            model,
+            max_tokens,
+            stream: false,
+          });
+          ({ modelResult, answerText, parseError, isNotFound } = normalizeModelResult({
+            response: openAIResult.text,
+          }));
+        } else {
+          ({ modelResult, answerText, parseError, isNotFound } = normalizeModelResult(output));
+        }
 
         if (isNotFound) {
           return json({
